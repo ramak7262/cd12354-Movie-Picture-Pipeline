@@ -20,8 +20,29 @@ jobs:
   checks:
     uses: ./.github/workflows/frontend-ci.yml
 
+  deployment-config:
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+          MOVIE_API_URL: ${{ vars.MOVIE_API_URL }}
+        run: |
+          if [[ -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" && -n "$ECR_REGISTRY" && -n "$EKS_CLUSTER_NAME" && -n "$MOVIE_API_URL" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "AWS/ECR/EKS deployment configuration is not available; skipping publish and deploy."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
   publish:
-    needs: checks
+    needs: [checks, deployment-config]
+    if: needs.deployment-config.outputs.configured == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +60,8 @@ jobs:
           tags: ${{ env.ECR_REGISTRY }}/frontend:${{ github.sha }}
 
   deploy:
-    needs: publish
+    needs: [publish, deployment-config]
+    if: needs.deployment-config.outputs.configured == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
