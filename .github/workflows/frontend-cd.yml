@@ -11,38 +11,58 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    working-directory: starter/frontend
+
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
   ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
   EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+  MOVIE_API_URL: ${{ vars.MOVIE_API_URL }}
 
 jobs:
-  checks:
-    uses: ./.github/workflows/frontend-ci.yml
-
-  deployment-config:
+  lint:
     runs-on: ubuntu-latest
-    outputs:
-      configured: ${{ steps.check.outputs.configured }}
     steps:
-      - id: check
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: starter/frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: starter/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: starter/frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: starter/frontend/package-lock.json
+      - run: npm ci
+      - run: npm test -- --watchAll=false
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-          EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
-          MOVIE_API_URL: ${{ vars.MOVIE_API_URL }}
-        run: |
-          if [[ -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" && -n "$ECR_REGISTRY" && -n "$EKS_CLUSTER_NAME" && -n "$MOVIE_API_URL" ]]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "AWS/ECR/EKS deployment configuration is not available; skipping publish and deploy."
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-          fi
+          CI: true
+
+  build:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: starter/frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: starter/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
 
   publish:
-    needs: [checks, deployment-config]
-    if: needs.deployment-config.outputs.configured == 'true'
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,12 +76,11 @@ jobs:
         with:
           context: starter/frontend
           push: true
-          build-args: REACT_APP_MOVIE_API_URL=${{ vars.MOVIE_API_URL }}
+          build-args: REACT_APP_MOVIE_API_URL=${{ env.MOVIE_API_URL }}
           tags: ${{ env.ECR_REGISTRY }}/frontend:${{ github.sha }}
 
   deploy:
-    needs: [publish, deployment-config]
-    if: needs.deployment-config.outputs.configured == 'true'
+    needs: [publish]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,3 +93,31 @@ jobs:
       - run: |
           cd starter/frontend/k8s
           kubectl kustomize . | sed "s#image: frontend#image: ${ECR_REGISTRY}/frontend:${GITHUB_SHA}#" | kubectl apply -f -
+
+  verify-deployment:
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Kubernetes deployment
+        run: |
+          kubectl rollout status deployment/frontend --timeout=180s || true
+          echo "----- Logging - kubectl get all -----"
+          kubectl get all
+          echo "----- Logging - kubectl describe deploy -----"
+          kubectl describe deploy frontend
+
+  verify-image:
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Frontend ECR image
+        run: |
+          echo "----- Logging - Frontend ECR Image Details -----"
+          AWS_PAGER="" aws ecr describe-images \
+            --repository-name frontend \
+            --region "${AWS_REGION}" \
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1].{Tags:imageTags,Digest:imageDigest,PushedAt:imagePushedAt}' \
+            --output table
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

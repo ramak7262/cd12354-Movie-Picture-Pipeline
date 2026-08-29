@@ -11,37 +11,56 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    working-directory: starter/backend
+
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
   ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
   EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
 
 jobs:
-  checks:
-    uses: ./.github/workflows/backend-ci.yml
-
-  deployment-config:
+  lint:
     runs-on: ubuntu-latest
-    outputs:
-      configured: ${{ steps.check.outputs.configured }}
     steps:
-      - id: check
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
-          EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
-        run: |
-          if [[ -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" && -n "$ECR_REGISTRY" && -n "$EKS_CLUSTER_NAME" ]]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "AWS/ECR/EKS deployment configuration is not available; skipping publish and deploy."
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-          fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: starter/backend/Pipfile.lock
+      - run: python -m pip install --upgrade pip pipenv
+      - run: pipenv install --dev --deploy
+      - run: pipenv run lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: starter/backend/Pipfile.lock
+      - run: python -m pip install --upgrade pip pipenv
+      - run: pipenv install --dev --deploy
+      - run: pipenv run test
+
+  build:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: starter/backend
+          push: false
+          tags: movie-picture-pipeline/backend:${{ github.sha }}
 
   publish:
-    needs: [checks, deployment-config]
-    if: needs.deployment-config.outputs.configured == 'true'
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,8 +77,7 @@ jobs:
           tags: ${{ env.ECR_REGISTRY }}/backend:${{ github.sha }}
 
   deploy:
-    needs: [publish, deployment-config]
-    if: needs.deployment-config.outputs.configured == 'true'
+    needs: [publish]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,3 +90,31 @@ jobs:
       - run: |
           cd starter/backend/k8s
           kubectl kustomize . | sed "s#image: backend#image: ${ECR_REGISTRY}/backend:${GITHUB_SHA}#" | kubectl apply -f -
+
+  verify-deployment:
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Kubernetes deployment
+        run: |
+          kubectl rollout status deployment/backend --timeout=180s || true
+          echo "----- Logging - kubectl get all -----"
+          kubectl get all
+          echo "----- Logging - kubectl describe deploy -----"
+          kubectl describe deploy backend
+
+  verify-image:
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Backend ECR image
+        run: |
+          echo "----- Logging - Backend ECR Image Details -----"
+          AWS_PAGER="" aws ecr describe-images \
+            --repository-name backend \
+            --region "${AWS_REGION}" \
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1].{Tags:imageTags,Digest:imageDigest,PushedAt:imagePushedAt}' \
+            --output table
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
