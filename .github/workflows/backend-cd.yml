@@ -90,7 +90,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
       - run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
       - run: |
-          cd starter/backend/k8s
+          cd k8s
           kubectl kustomize . | sed "s#image: backend#image: ${ECR_REGISTRY}/backend:${GITHUB_SHA}#" | kubectl apply -f -
 
   verify-deployment:
