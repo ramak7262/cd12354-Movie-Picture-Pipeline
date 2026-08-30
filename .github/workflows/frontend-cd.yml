@@ -11,10 +11,6 @@ on:
 permissions:
   contents: read
 
-defaults:
-  run:
-    working-directory: starter/frontend
-
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
   ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
@@ -22,102 +18,217 @@ env:
   MOVIE_API_URL: ${{ vars.MOVIE_API_URL }}
 
 jobs:
+
+  # ============================================================
+  # LINT
+  # ============================================================
   lint:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version-file: starter/frontend/.nvmrc
           cache: npm
           cache-dependency-path: starter/frontend/package-lock.json
-      - run: npm ci
-      - run: npm run lint
 
+      - name: Install dependencies
+        working-directory: starter/frontend
+        run: npm ci
+
+      - name: Run lint
+        working-directory: starter/frontend
+        run: npm run lint
+
+
+  # ============================================================
+  # TEST
+  # ============================================================
   test:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version-file: starter/frontend/.nvmrc
           cache: npm
           cache-dependency-path: starter/frontend/package-lock.json
-      - run: npm ci
-      - run: npm test -- --watchAll=false
+
+      - name: Install dependencies
+        working-directory: starter/frontend
+        run: npm ci
+
+      - name: Run tests
+        working-directory: starter/frontend
+        run: npm test -- --watchAll=false
         env:
           CI: true
 
+
+  # ============================================================
+  # BUILD
+  # ============================================================
   build:
     needs: [lint, test]
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version-file: starter/frontend/.nvmrc
           cache: npm
           cache-dependency-path: starter/frontend/package-lock.json
-      - run: npm ci
-      - run: npm run build
 
+      - name: Install dependencies
+        working-directory: starter/frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: starter/frontend
+        run: npm run build
+
+
+  # ============================================================
+  # PUBLISH TO ECR
+  # ============================================================
   publish:
     needs: [build]
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
-      - uses: aws-actions/amazon-ecr-login@v2
-      - uses: docker/build-push-action@v6
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push frontend Docker image
+        uses: docker/build-push-action@v6
         with:
           context: starter/frontend
           push: true
-          build-args: REACT_APP_MOVIE_API_URL=${{ env.MOVIE_API_URL }}
+          build-args: |
+            REACT_APP_MOVIE_API_URL=${{ env.MOVIE_API_URL }}
           tags: ${{ env.ECR_REGISTRY }}/frontend:${{ github.sha }}
 
+
+  # ============================================================
+  # DEPLOY TO EKS
+  # ============================================================
   deploy:
     needs: [publish]
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
-      - run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
-      - run: |
-          cd starter/frontend/k8s
-          kubectl kustomize . | sed "s#image: frontend#image: ${ECR_REGISTRY}/frontend:${GITHUB_SHA}#" | kubectl apply -f -
 
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
+      - name: Deploy frontend to Kubernetes
+        run: |
+          cd starter/frontend/k8s
+          kubectl kustomize . \
+            | sed "s#image: frontend#image: ${ECR_REGISTRY}/frontend:${GITHUB_SHA}#" \
+            | kubectl apply -f -
+
+
+  # ============================================================
+  # VERIFY KUBERNETES DEPLOYMENT
+  # ============================================================
   verify-deployment:
     needs: [deploy]
     runs-on: ubuntu-latest
+
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
       - name: Verify Kubernetes deployment
         run: |
           kubectl rollout status deployment/frontend --timeout=180s || true
+
           echo "----- Logging - kubectl get all -----"
           kubectl get all
-          echo "----- Logging - kubectl describe deploy -----"
-          kubectl describe deploy frontend
 
+          echo "----- Logging - kubectl describe deployment -----"
+          kubectl describe deployment frontend
+
+
+  # ============================================================
+  # VERIFY ECR IMAGE
+  # ============================================================
   verify-image:
     needs: [deploy]
     runs-on: ubuntu-latest
+
     steps:
-      - name: Verify Frontend ECR image
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify frontend ECR image
         run: |
           echo "----- Logging - Frontend ECR Image Details -----"
+
           AWS_PAGER="" aws ecr describe-images \
             --repository-name frontend \
             --region "${AWS_REGION}" \
             --query 'sort_by(imageDetails,&imagePushedAt)[-1].{Tags:imageTags,Digest:imageDigest,PushedAt:imagePushedAt}' \
             --output table
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
