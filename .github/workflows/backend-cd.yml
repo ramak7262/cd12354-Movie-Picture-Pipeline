@@ -96,7 +96,23 @@ jobs:
   verify-deployment:
     needs: [deploy]
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+
       - name: Verify Kubernetes deployment
         run: |
           kubectl rollout status deployment/backend --timeout=180s || true
@@ -108,7 +124,20 @@ jobs:
   verify-image:
     needs: [deploy]
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Verify Backend ECR image
         run: |
           echo "----- Logging - Backend ECR Image Details -----"
@@ -117,6 +146,3 @@ jobs:
             --region "${AWS_REGION}" \
             --query 'sort_by(imageDetails,&imagePushedAt)[-1].{Tags:imageTags,Digest:imageDigest,PushedAt:imagePushedAt}' \
             --output table
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
