@@ -23,37 +23,61 @@ env:
 jobs:
   lint:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: pip
           cache-dependency-path: starter/backend/Pipfile.lock
-      - run: python -m pip install --upgrade pip pipenv
-      - run: pipenv install --dev --deploy
-      - run: pipenv run lint
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip pipenv
+          pipenv install --dev --deploy
+
+      - name: Run lint
+        run: pipenv run lint
 
   test:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: pip
           cache-dependency-path: starter/backend/Pipfile.lock
-      - run: python -m pip install --upgrade pip pipenv
-      - run: pipenv install --dev --deploy
-      - run: pipenv run test
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip pipenv
+          pipenv install --dev --deploy
+
+      - name: Run tests
+        run: pipenv run test
 
   build:
     needs: [lint, test]
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend Docker image
+        uses: docker/build-push-action@v6
         with:
           context: starter/backend
           push: false
@@ -62,16 +86,24 @@ jobs:
   publish:
     needs: [build]
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
-      - uses: aws-actions/amazon-ecr-login@v2
-      - uses: docker/build-push-action@v6
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
         with:
           context: starter/backend
           push: true
@@ -80,25 +112,40 @@ jobs:
   deploy:
     needs: [publish]
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
-      - run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
-      - run: |
+
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
+      - name: Deploy backend to Kubernetes
+        run: |
           cd k8s
-          kubectl kustomize . | sed "s#image: backend#image: ${ECR_REGISTRY}/backend:${GITHUB_SHA}#" | kubectl apply -f -
+          kubectl kustomize . \
+            | sed "s#image: backend#image: ${ECR_REGISTRY}/backend:${GITHUB_SHA}#" \
+            | kubectl apply -f -
 
   verify-deployment:
     needs: [deploy]
     runs-on: ubuntu-latest
+
     defaults:
       run:
         working-directory: .
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -108,25 +155,34 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+        run: |
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
 
       - name: Verify Kubernetes deployment
         run: |
+          echo "----- Kubernetes rollout status -----"
           kubectl rollout status deployment/backend --timeout=180s || true
-          echo "----- Logging - kubectl get all -----"
+
+          echo "----- Kubernetes resources -----"
           kubectl get all
-          echo "----- Logging - kubectl describe deploy -----"
-          kubectl describe deploy backend
+
+          echo "----- Backend deployment details -----"
+          kubectl describe deployment backend
 
   verify-image:
     needs: [deploy]
     runs-on: ubuntu-latest
+
     defaults:
       run:
         working-directory: .
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -136,11 +192,12 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Verify Backend ECR image
+      - name: Verify backend ECR image
         run: |
-          echo "----- Logging - Backend ECR Image Details -----"
+          echo "----- Backend ECR image details -----"
           AWS_PAGER="" aws ecr describe-images \
             --repository-name backend \
             --region "${AWS_REGION}" \
