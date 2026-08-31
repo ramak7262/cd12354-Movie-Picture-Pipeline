@@ -1,27 +1,26 @@
-name: Frontend CD
+name: Backend Continuous Deployment
 
 on:
   push:
     branches: [main]
     paths:
-      - 'starter/frontend/**'
-      - '.github/workflows/frontend-cd.yml'
+      - 'starter/backend/**'
+      - '.github/workflows/backend-cd.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+defaults:
+  run:
+    working-directory: starter/backend
+
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
   ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
   EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
-  MOVIE_API_URL: ${{ vars.MOVIE_API_URL }}
 
 jobs:
-
-  # ============================================================
-  # LINT
-  # ============================================================
   lint:
     runs-on: ubuntu-latest
 
@@ -29,25 +28,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          node-version-file: starter/frontend/.nvmrc
-          cache: npm
-          cache-dependency-path: starter/frontend/package-lock.json
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: starter/backend/Pipfile.lock
 
       - name: Install dependencies
-        working-directory: starter/frontend
-        run: npm ci
+        run: |
+          python -m pip install --upgrade pip pipenv
+          pipenv install --dev --deploy
 
       - name: Run lint
-        working-directory: starter/frontend
-        run: npm run lint
+        run: pipenv run lint
 
-
-  # ============================================================
-  # TEST
-  # ============================================================
   test:
     runs-on: ubuntu-latest
 
@@ -55,27 +50,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          node-version-file: starter/frontend/.nvmrc
-          cache: npm
-          cache-dependency-path: starter/frontend/package-lock.json
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: starter/backend/Pipfile.lock
 
       - name: Install dependencies
-        working-directory: starter/frontend
-        run: npm ci
+        run: |
+          python -m pip install --upgrade pip pipenv
+          pipenv install --dev --deploy
 
       - name: Run tests
-        working-directory: starter/frontend
-        run: npm test -- --watchAll=false
-        env:
-          CI: true
+        run: pipenv run test
 
-
-  # ============================================================
-  # BUILD
-  # ============================================================
   build:
     needs: [lint, test]
     runs-on: ubuntu-latest
@@ -84,25 +73,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend Docker image
+        uses: docker/build-push-action@v6
         with:
-          node-version-file: starter/frontend/.nvmrc
-          cache: npm
-          cache-dependency-path: starter/frontend/package-lock.json
+          context: starter/backend
+          push: false
+          tags: movie-picture-pipeline/backend:${{ github.sha }}
 
-      - name: Install dependencies
-        working-directory: starter/frontend
-        run: npm ci
-
-      - name: Build frontend
-        working-directory: starter/frontend
-        run: npm run build
-
-
-  # ============================================================
-  # PUBLISH TO ECR
-  # ============================================================
   publish:
     needs: [build]
     runs-on: ubuntu-latest
@@ -119,25 +99,16 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
-
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push frontend Docker image
+      - name: Build and push backend image
         uses: docker/build-push-action@v6
         with:
-          context: starter/frontend
+          context: starter/backend
           push: true
-          build-args: |
-            REACT_APP_MOVIE_API_URL=${{ env.MOVIE_API_URL }}
-          tags: ${{ env.ECR_REGISTRY }}/frontend:${{ github.sha }}
+          tags: ${{ env.ECR_REGISTRY }}/backend:${{ github.sha }}
 
-
-  # ============================================================
-  # DEPLOY TO EKS
-  # ============================================================
   deploy:
     needs: [publish]
     runs-on: ubuntu-latest
@@ -154,29 +125,26 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
-
-      - name: Update kubeconfig
+      - name: Configure kubectl for EKS
         run: |
           aws eks update-kubeconfig \
             --name "$EKS_CLUSTER_NAME" \
             --region "$AWS_REGION"
 
-      - name: Deploy frontend to Kubernetes
+      - name: Deploy backend to Kubernetes
         run: |
-          cd starter/frontend/k8s
+          cd k8s
           kubectl kustomize . \
-            | sed "s#image: frontend#image: ${ECR_REGISTRY}/frontend:${GITHUB_SHA}#" \
+            | sed "s#image: backend#image: ${ECR_REGISTRY}/backend:${GITHUB_SHA}#" \
             | kubectl apply -f -
 
-
-  # ============================================================
-  # VERIFY KUBERNETES DEPLOYMENT
-  # ============================================================
   verify-deployment:
     needs: [deploy]
     runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: .
 
     steps:
       - name: Checkout repository
@@ -198,23 +166,27 @@ jobs:
 
       - name: Verify Kubernetes deployment
         run: |
-          kubectl rollout status deployment/frontend --timeout=180s || true
+          echo "----- Kubernetes rollout status -----"
+          kubectl rollout status deployment/backend --timeout=180s || true
 
-          echo "----- Logging - kubectl get all -----"
+          echo "----- Kubernetes resources -----"
           kubectl get all
 
-          echo "----- Logging - kubectl describe deployment -----"
-          kubectl describe deployment frontend
+          echo "----- Backend deployment details -----"
+          kubectl describe deployment backend
 
-
-  # ============================================================
-  # VERIFY ECR IMAGE
-  # ============================================================
   verify-image:
     needs: [deploy]
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        working-directory: .
+
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -223,12 +195,11 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Verify frontend ECR image
+      - name: Verify backend ECR image
         run: |
-          echo "----- Logging - Frontend ECR Image Details -----"
-
+          echo "----- Backend ECR image details -----"
           AWS_PAGER="" aws ecr describe-images \
-            --repository-name frontend \
+            --repository-name backend \
             --region "${AWS_REGION}" \
             --query 'sort_by(imageDetails,&imagePushedAt)[-1].{Tags:imageTags,Digest:imageDigest,PushedAt:imagePushedAt}' \
             --output table
